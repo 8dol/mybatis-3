@@ -36,7 +36,7 @@ import org.apache.ibatis.logging.LogFactory;
 
 /**
  * A default implementation of {@link VFS} that works for most application servers.
- * 
+ *
  * @author Ben Gunter
  */
 public class DefaultVFS extends VFS {
@@ -58,7 +58,7 @@ public class DefaultVFS extends VFS {
 
       // First, try to find the URL of a JAR file containing the requested resource. If a JAR
       // file is found, then we'll list child resources by reading the JAR.
-      URL jarUrl = findJarForResource(url);
+      URL jarUrl = findJarForResource(url, ".jar");
       if (jarUrl != null) {
         is = jarUrl.openStream();
         if (log.isDebugEnabled()) {
@@ -67,90 +67,103 @@ public class DefaultVFS extends VFS {
         resources = listResources(new JarInputStream(is), path);
       }
       else {
-        List<String> children = new ArrayList<String>();
-        try {
-          if (isJar(url)) {
-            // Some versions of JBoss VFS might give a JAR stream even if the resource
-            // referenced by the URL isn't actually a JAR
-            is = url.openStream();
-            JarInputStream jarInput = new JarInputStream(is);
-            if (log.isDebugEnabled()) {
-              log.debug("Listing " + url);
-            }
-            for (JarEntry entry; (entry = jarInput.getNextJarEntry()) != null;) {
-              if (log.isDebugEnabled()) {
-                log.debug("Jar entry: " + entry.getName());
-              }
-              children.add(entry.getName());
-            }
-            jarInput.close();
+        URL warUrl = findJarForResource(url, ".war");
+        if (warUrl != null) {
+          is = warUrl.openStream();
+          if (log.isDebugEnabled()) {
+            log.debug("Listing " + url);
           }
-          else {
-            /*
-             * Some servlet containers allow reading from directory resources like a
-             * text file, listing the child resources one per line. However, there is no
-             * way to differentiate between directory and file resources just by reading
-             * them. To work around that, as each line is read, try to look it up via
-             * the class loader as a child of the current resource. If any line fails
-             * then we assume the current resource is not a directory.
-             */
-            is = url.openStream();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(is));
-            List<String> lines = new ArrayList<String>();
-            for (String line; (line = reader.readLine()) != null;) {
-              if (log.isDebugEnabled()) {
-                log.debug("Reader entry: " + line);
-              }
-              lines.add(line);
-              if (getResources(path + "/" + line).isEmpty()) {
-                lines.clear();
-                break;
-              }
-            }
-
-            if (!lines.isEmpty()) {
+          resources = listResources(new JarInputStream(is), "WEB-INF/classes/" + path);
+          ArrayList<String> tmp = new ArrayList<String>();
+          for (String classPath : resources) {
+            tmp.add(classPath.replaceFirst("WEB-INF/classes/", ""));
+          }
+          resources = tmp;
+        }
+        else {
+          List<String> children = new ArrayList<String>();
+          try {
+            if (isJar(url)) {
+              // Some versions of JBoss VFS might give a JAR stream even if the resource
+              // referenced by the URL isn't actually a JAR
+              is = url.openStream();
+              JarInputStream jarInput = new JarInputStream(is);
               if (log.isDebugEnabled()) {
                 log.debug("Listing " + url);
               }
-              children.addAll(lines);
-            }
-          }
-        } catch (FileNotFoundException e) {
-          /*
-           * For file URLs the openStream() call might fail, depending on the servlet
-           * container, because directories can't be opened for reading. If that happens,
-           * then list the directory directly instead.
-           */
-          if ("file".equals(url.getProtocol())) {
-            File file = new File(url.getFile());
-            if (log.isDebugEnabled()) {
-                log.debug("Listing directory " + file.getAbsolutePath());
-            }
-            if (file.isDirectory()) {
-              if (log.isDebugEnabled()) {
-                  log.debug("Listing " + url);
+              for (JarEntry entry; (entry = jarInput.getNextJarEntry()) != null; ) {
+                if (log.isDebugEnabled()) {
+                  log.debug("Jar entry: " + entry.getName());
+                }
+                children.add(entry.getName());
               }
-              children = Arrays.asList(file.list());
+              jarInput.close();
+            } else {
+              /*
+               * Some servlet containers allow reading from directory resources like a
+               * text file, listing the child resources one per line. However, there is no
+               * way to differentiate between directory and file resources just by reading
+               * them. To work around that, as each line is read, try to look it up via
+               * the class loader as a child of the current resource. If any line fails
+               * then we assume the current resource is not a directory.
+               */
+              is = url.openStream();
+              BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+              List<String> lines = new ArrayList<String>();
+              for (String line; (line = reader.readLine()) != null; ) {
+                if (log.isDebugEnabled()) {
+                  log.debug("Reader entry: " + line);
+                }
+                lines.add(line);
+                if (getResources(path + "/" + line).isEmpty()) {
+                  lines.clear();
+                  break;
+                }
+              }
+
+              if (!lines.isEmpty()) {
+                if (log.isDebugEnabled()) {
+                  log.debug("Listing " + url);
+                }
+                children.addAll(lines);
+              }
+            }
+          } catch (FileNotFoundException e) {
+            /*
+             * For file URLs the openStream() call might fail, depending on the servlet
+             * container, because directories can't be opened for reading. If that happens,
+             * then list the directory directly instead.
+             */
+            if ("file".equals(url.getProtocol())) {
+              File file = new File(url.getFile());
+              if (log.isDebugEnabled()) {
+                log.debug("Listing directory " + file.getAbsolutePath());
+              }
+              if (file.isDirectory()) {
+                if (log.isDebugEnabled()) {
+                  log.debug("Listing " + url);
+                }
+                children = Arrays.asList(file.list());
+              }
+            } else {
+              // No idea where the exception came from so rethrow it
+              throw e;
             }
           }
-          else {
-            // No idea where the exception came from so rethrow it
-            throw e;
+
+          // The URL prefix to use when recursively listing child resources
+          String prefix = url.toExternalForm();
+          if (!prefix.endsWith("/")) {
+            prefix = prefix + "/";
           }
-        }
 
-        // The URL prefix to use when recursively listing child resources
-        String prefix = url.toExternalForm();
-        if (!prefix.endsWith("/")) {
-          prefix = prefix + "/";
-        }
-
-        // Iterate over immediate children, adding files and recursing into directories
-        for (String child : children) {
-          String resourcePath = path + "/" + child;
-          resources.add(resourcePath);
-          URL childUrl = new URL(prefix + child);
-          resources.addAll(list(childUrl, resourcePath));
+          // Iterate over immediate children, adding files and recursing into directories
+          for (String child : children) {
+            String resourcePath = path + "/" + child;
+            resources.add(resourcePath);
+            URL childUrl = new URL(prefix + child);
+            resources.addAll(list(childUrl, resourcePath));
+          }
         }
       }
 
@@ -169,7 +182,7 @@ public class DefaultVFS extends VFS {
   /**
    * List the names of the entries in the given {@link JarInputStream} that begin with the
    * specified {@code path}. Entries will match with or without a leading slash.
-   * 
+   *
    * @param jar The JAR input stream
    * @param path The leading path to match
    * @return The names of all the matching entries
@@ -212,12 +225,12 @@ public class DefaultVFS extends VFS {
    * by the URL. That is, assuming the URL references a JAR entry, this method will return a URL
    * that references the JAR file containing the entry. If the JAR cannot be located, then this
    * method returns null.
-   * 
+   *
    * @param url The URL of the JAR entry.
    * @return The URL of the JAR file, if one is found. Null if not.
    * @throws MalformedURLException
    */
-  protected URL findJarForResource(URL url) throws MalformedURLException {
+  protected URL findJarForResource(URL url, String suffix) throws MalformedURLException {
     if (log.isDebugEnabled()) {
       log.debug("Find JAR URL: " + url);
     }
@@ -236,7 +249,7 @@ public class DefaultVFS extends VFS {
 
     // Look for the .jar extension and chop off everything after that
     StringBuilder jarUrl = new StringBuilder(url.toExternalForm());
-    int index = jarUrl.lastIndexOf(".jar");
+    int index = jarUrl.lastIndexOf(suffix);
     if (index >= 0) {
       jarUrl.setLength(index + 4);
       if (log.isDebugEnabled()) {
@@ -296,7 +309,7 @@ public class DefaultVFS extends VFS {
   /**
    * Converts a Java package name to a path that can be looked up with a call to
    * {@link ClassLoader#getResources(String)}.
-   * 
+   *
    * @param packageName The Java package name to convert to a path
    */
   protected String getPackagePath(String packageName) {
@@ -305,7 +318,7 @@ public class DefaultVFS extends VFS {
 
   /**
    * Returns true if the resource located at the given URL is a JAR file.
-   * 
+   *
    * @param url The URL of the resource to test.
    */
   protected boolean isJar(URL url) {
@@ -314,7 +327,7 @@ public class DefaultVFS extends VFS {
 
   /**
    * Returns true if the resource located at the given URL is a JAR file.
-   * 
+   *
    * @param url The URL of the resource to test.
    * @param buffer A buffer into which the first few bytes of the resource are read. The buffer
    *            must be at least the size of {@link #JAR_MAGIC}. (The same buffer may be reused
